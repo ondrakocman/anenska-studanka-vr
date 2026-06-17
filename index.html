@@ -41,11 +41,11 @@
   <h1>Větrný park Anenská Studánka – VR</h1>
   <p class="subtitle">Vizualizace větrného parku – tři lokace</p>
   <div class="buttons">
-    <button class="view-btn" data-src="assets/lokace-1.jpg">Lokace 1</button>
-    <button class="view-btn" data-src="assets/lokace-2.jpg">Lokace 2</button>
-    <button class="view-btn" data-src="assets/lokace-3.jpg">Lokace 3</button>
+    <button class="view-btn" data-index="0">Lokace 1</button>
+    <button class="view-btn" data-index="1">Lokace 2</button>
+    <button class="view-btn" data-index="2">Lokace 3</button>
   </div>
-  <p class="hint">Nasaďte Meta Quest a vyberte lokaci. Panorama se vykresluje pomocí WebXR Layers přímo systémovým kompozitorem.</p>
+  <p class="hint">Nasaďte Meta Quest a vyberte lokaci. V headsetu pak přepínáte mezi lokacemi nakloněním páčky ovladače doleva / doprava. Panorama se vykresluje pomocí WebXR Layers přímo systémovým kompozitorem.</p>
   <a class="nav" href="aframe/">klasická verze (A-Frame) →</a>
 </div>
 
@@ -60,8 +60,21 @@
   var loading = document.getElementById('loading-overlay');
   var errorBox = document.getElementById('error');
 
+  var LOCATIONS = ['assets/lokace-1.jpg', 'assets/lokace-2.jpg', 'assets/lokace-3.jpg'];
+
   var session = null;
   var imageCache = {};
+
+  // Layer/render state, shared with the frame loop.
+  var equirectLayer = null;
+  var glBinding = null;
+  var gl = null;
+  var currentImg = null;
+  var redrawFrames = 0;     // re-upload the texture for this many frames (covers double-buffered layers)
+  var currentIndex = 0;
+
+  // Thumbstick edge detection: only fire once per flick, re-arm near centre.
+  var stickArmed = true;
 
   function showError(msg, ttl){
     errorBox.textContent = msg;
@@ -81,13 +94,51 @@
     });
   }
 
+  // Warm the cache so in-headset toggling is instant.
+  LOCATIONS.forEach(function(src){ loadImage(src).catch(function(){}) });
+
   function endSession(){
     landing.classList.remove('hidden');
     loading.classList.remove('visible');
     session = null;
+    equirectLayer = null;
+    glBinding = null;
+    currentImg = null;
   }
 
-  async function startSession(srcUrl){
+  // Switch the displayed panorama in place, without ending the VR session.
+  async function showLocation(index){
+    if(!session) return;
+    index = (index + LOCATIONS.length) % LOCATIONS.length;
+    currentIndex = index;
+    var img;
+    try{ img = await loadImage(LOCATIONS[index]); }
+    catch(e){ return; }
+    if(!session) return;          // session may have ended while loading
+    currentImg = img;
+    redrawFrames = 3;             // force a few re-uploads so every layer buffer updates
+  }
+
+  // Poll Quest thumbstick X (xr-standard axes[2]); flick right = next, left = previous.
+  function pollControllers(){
+    if(!session) return;
+    var x = 0;
+    var sources = session.inputSources;
+    for(var i = 0; i < sources.length; i++){
+      var gp = sources[i] && sources[i].gamepad;
+      if(!gp || !gp.axes) continue;
+      var ax = gp.axes.length > 2 ? gp.axes[2] : gp.axes[0];   // thumbstick X, fall back to axis 0
+      if(Math.abs(ax) > Math.abs(x)) x = ax;
+    }
+    if(stickArmed && Math.abs(x) > 0.7){
+      stickArmed = false;
+      showLocation(currentIndex + (x > 0 ? 1 : -1));
+    } else if(Math.abs(x) < 0.3){
+      stickArmed = true;
+    }
+  }
+
+  async function startSession(startIndex){
     if(!('xr' in navigator)){
       showError('WebXR není v tomto prohlížeči podporováno – použijte klasickou verzi.');
       return;
@@ -107,15 +158,17 @@
 
     var img;
     try{
-      img = await loadImage(srcUrl);
+      img = await loadImage(LOCATIONS[startIndex]);
     }catch(e){
       showError(e.message || String(e));
       loading.classList.remove('visible');
       return;
     }
+    currentIndex = startIndex;
+    currentImg = img;
 
     var canvas = document.createElement('canvas');
-    var gl = canvas.getContext('webgl2', { xrCompatible: true });
+    gl = canvas.getContext('webgl2', { xrCompatible: true });
     if(!gl){
       showError('WebGL2 není k dispozici – použijte klasickou verzi.');
       loading.classList.remove('visible');
@@ -139,8 +192,9 @@
       refSpace = await session.requestReferenceSpace('local');
     }
 
-    var glBinding = new XRWebGLBinding(session, gl);
-    var equirectLayer = glBinding.createEquirectLayer({
+    glBinding = new XRWebGLBinding(session, gl);
+    // All panoramas share the same 8192×4096 resolution, so one layer serves all of them.
+    equirectLayer = glBinding.createEquirectLayer({
       space: refSpace,
       viewPixelWidth: img.width,
       viewPixelHeight: img.height,
@@ -148,17 +202,21 @@
     });
 
     session.updateRenderState({ layers: [equirectLayer] });
+    redrawFrames = 3;   // initial paint
 
-    // The layer is composited by the system. We only re-upload the texture
-    // when the compositor asks for a redraw (first frame, focus regain, …).
+    // The layer is composited by the system. We re-upload the texture when the
+    // compositor asks for a redraw, or when we just switched location.
     function onFrame(t, frame){
       if(!session) return;
       session.requestAnimationFrame(onFrame);
-      if(equirectLayer.needsRedraw){
+      pollControllers();
+      if(equirectLayer.needsRedraw) redrawFrames = Math.max(redrawFrames, 3);
+      if(redrawFrames > 0 && currentImg){
+        redrawFrames--;
         var subImage = glBinding.getSubImage(equirectLayer, frame);
         gl.bindTexture(gl.TEXTURE_2D, subImage.colorTexture);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, currentImg);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
         gl.bindTexture(gl.TEXTURE_2D, null);
       }
@@ -172,7 +230,7 @@
   }
 
   document.querySelectorAll('.view-btn').forEach(function(btn){
-    btn.addEventListener('click', function(){ startSession(btn.dataset.src) });
+    btn.addEventListener('click', function(){ startSession(parseInt(btn.dataset.index, 10) || 0) });
   });
 })();
 </script>

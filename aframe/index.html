@@ -46,7 +46,7 @@
     <button class="view-btn" data-img="img-2">Lokace 2</button>
     <button class="view-btn" data-img="img-3">Lokace 3</button>
   </div>
-  <p class="hint">Funguje i bez headsetu – na počítači se rozhlížejte tažením myší. Na Questu doporučujeme výchozí verzi s WebXR Layers.</p>
+  <p class="hint">Funguje i bez headsetu – na počítači se rozhlížejte tažením myší. V headsetu přepínáte mezi lokacemi nakloněním páčky ovladače doleva / doprava. Na Questu doporučujeme výchozí verzi s WebXR Layers.</p>
   <a class="nav" href="../">← výchozí verze (WebXR Layers)</a>
 </div>
 
@@ -63,6 +63,8 @@
   <a-sky id="sky" visible="false" material="shader:flat;side:back"></a-sky>
   <a-entity id="rig" position="0 1.6 0">
     <a-camera look-controls="pointerLockEnabled:false" wasd-controls="enabled:false"></a-camera>
+    <a-entity id="left-hand"  oculus-touch-controls="hand:left"  laser-controls="hand:left"></a-entity>
+    <a-entity id="right-hand" oculus-touch-controls="hand:right" laser-controls="hand:right"></a-entity>
   </a-entity>
 </a-scene>
 
@@ -74,20 +76,48 @@
   var scene   = document.querySelector('a-scene');
   var sky     = document.getElementById('sky');
 
+  var IMAGES = ['img-1', 'img-2', 'img-3'];
+  var currentIndex = 0;
+  var active = false;       // a panorama is currently shown
+  var stickArmed = true;    // thumbstick edge detection
+
+  function showLocation(index){
+    currentIndex = (index + IMAGES.length) % IMAGES.length;
+    sky.setAttribute('material', 'src', '#' + IMAGES[currentIndex]);
+  }
+
   document.querySelectorAll('.view-btn').forEach(function(btn){
     btn.addEventListener('click', async function(){
       loading.classList.add('visible');
       if(!scene.hasLoaded) await new Promise(function(r){ scene.addEventListener('loaded', r, { once:true }) });
-      sky.setAttribute('material', 'src', '#' + btn.dataset.img);
+      currentIndex = IMAGES.indexOf(btn.dataset.img);
+      showLocation(currentIndex);
       try{ await scene.enterVR() }catch(e){ console.warn('VR fallback (2D režim):', e) }
       sky.object3D.visible = true;
+      active = true;
       landing.classList.add('hidden');
       loading.classList.remove('visible');
     });
   });
 
+  // Flick the thumbstick left/right to cycle locations (right = next, left = previous).
+  function onThumbstick(e){
+    if(!active) return;
+    var x = e.detail.x || 0;
+    if(stickArmed && Math.abs(x) > 0.7){
+      stickArmed = false;
+      showLocation(currentIndex + (x > 0 ? 1 : -1));
+    } else if(Math.abs(x) < 0.3){
+      stickArmed = true;
+    }
+  }
+  ['left-hand', 'right-hand'].forEach(function(id){
+    document.getElementById(id).addEventListener('thumbstickmoved', onThumbstick);
+  });
+
   scene.addEventListener('exit-vr', function(){
     sky.object3D.visible = false;
+    active = false;
     landing.classList.remove('hidden');
   });
 
@@ -95,6 +125,7 @@
   window.addEventListener('keydown', function(e){
     if(e.key === 'Escape' && landing.classList.contains('hidden') && !scene.is('vr-mode')){
       sky.object3D.visible = false;
+      active = false;
       landing.classList.remove('hidden');
     }
   });
