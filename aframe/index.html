@@ -79,11 +79,9 @@
   </a-entity>
 </a-scene>
 
-<!-- Videos kept OUTSIDE <a-assets> so an empty (src-less) media element never blocks scene load.
-     PNG <img> elements are created lazily below. All are referenced by selector.
-     Two video buffers alternate (no loop attribute) for seamless looping. -->
-<video id="vidA" crossorigin="anonymous" muted playsinline preload="auto" style="display:none"></video>
-<video id="vidB" crossorigin="anonymous" muted playsinline preload="auto" style="display:none"></video>
+<!-- Video kept OUTSIDE <a-assets> so an empty (src-less) media element never blocks scene load.
+     PNG <img> elements are created lazily below. Both are referenced by selector. -->
+<video id="vid" crossorigin="anonymous" loop muted playsinline preload="auto" style="display:none"></video>
 
 <script>
 (function(){
@@ -92,8 +90,7 @@
   var loading = document.getElementById('loading-overlay');
   var scene   = document.querySelector('a-scene');
   var sky     = document.getElementById('sky');
-  var vbuf    = [document.getElementById('vidA'), document.getElementById('vidB')];
-  var activeBuf = 0;
+  var vid     = document.getElementById('vid');
 
   var ASSETS = [
     { webp:'../assets/lokace-1.webp', png:'../assets/lokace-1.png', video:'../assets/lokace-1.mp4' },
@@ -120,39 +117,24 @@
     return '#' + id;
   }
 
-  function stopVideos(){ vbuf.forEach(function(v){ try{ v.pause() }catch(e){} }); }
-
-  // Two video elements alternate: while one plays, the other waits paused at frame 0
-  // (already decoded), so taking over at the loop boundary causes no cold-start stall.
-  function startVideoLoop(index){
-    var url = ASSETS[index].video;
-    vbuf.forEach(function(v){ if(v.getAttribute('src') !== url){ v.src = url; v.load(); } });
-    activeBuf = 0;
-    var a = vbuf[0], b = vbuf[1];
-    try{ b.pause(); b.currentTime = 0; }catch(e){}   // prime the standby buffer at frame 0
-    try{ a.currentTime = 0; a.play().catch(function(){}); }catch(e){}
-    sky.setAttribute('material', 'src', '#vidA');
+  // Resolve the selector for the current mode/location and start playback for video.
+  function srcSelectorFor(index){
+    if(mode === 'video'){
+      if(vid.getAttribute('src') !== ASSETS[index].video){
+        vid.src = ASSETS[index].video;
+        vid.load();
+      }
+      vid.play().catch(function(){});
+      return '#vid';
+    }
+    if(mode === 'png') return ensurePng(index);
+    return '#webp-' + index;
   }
-
-  vbuf.forEach(function(v, i){
-    v.addEventListener('ended', function(){
-      if(mode !== 'video' || !active) return;
-      var n = 1 - i, next = vbuf[n];
-      try{ next.currentTime = 0; next.play().catch(function(){}); }catch(e){}
-      sky.setAttribute('material', 'src', n === 0 ? '#vidA' : '#vidB');
-      activeBuf = n;
-      try{ v.pause(); v.currentTime = 0; }catch(e){}   // re-prime the finished buffer at frame 0
-    });
-  });
 
   function applyLocation(index){
     currentIndex = (index + ASSETS.length) % ASSETS.length;
-    if(mode === 'video'){
-      startVideoLoop(currentIndex);
-    }else{
-      stopVideos();
-      sky.setAttribute('material', 'src', mode === 'png' ? ensurePng(currentIndex) : '#webp-' + currentIndex);
-    }
+    if(mode !== 'video'){ try{ vid.pause() }catch(e){} }
+    sky.setAttribute('material', 'src', srcSelectorFor(currentIndex));
   }
 
   // Mode selector.
@@ -198,7 +180,7 @@
 
   function backToMenu(){
     sky.object3D.visible = false;
-    stopVideos();
+    try{ vid.pause() }catch(e){}
     active = false;
     landing.classList.remove('hidden');
   }

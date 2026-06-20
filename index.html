@@ -88,43 +88,9 @@
   var currentImg = null, layerW = 0, layerH = 0, redrawFrames = 0;
   var imageCache = {};
 
-  // Video path state — double-buffered for seamless looping.
+  // Video path state.
   var mediaBinding = null, videoLayer = null;
-  var vbuf = null, activeBuf = 0;
-
-  function makeBufferVideo(){
-    var v = document.createElement('video');
-    v.crossOrigin = 'anonymous'; v.muted = true; v.playsInline = true; v.preload = 'auto';
-    v.style.display = 'none';
-    document.body.appendChild(v);
-    return v;
-  }
-
-  // Two video elements that alternate: while one plays, the other waits paused at
-  // frame 0 (already decoded), so taking over at the loop boundary causes no cold-start stall.
-  function ensureBuffers(){
-    if(vbuf) return;
-    vbuf = [makeBufferVideo(), makeBufferVideo()];
-    vbuf.forEach(function(v, i){
-      v.addEventListener('ended', function(){
-        if(mode !== 'video' || !session) return;
-        var n = 1 - i, next = vbuf[n];
-        try{ next.currentTime = 0; next.play(); }catch(e){}
-        videoLayer = mediaBinding.createEquirectLayer(next, { space: refSpace, layout: 'mono' });
-        session.updateRenderState({ layers: [videoLayer] });
-        activeBuf = n;
-        try{ v.pause(); v.currentTime = 0; }catch(e){}   // re-prime the finished buffer at frame 0
-      });
-    });
-  }
-
-  function videoReady(v){
-    return new Promise(function(resolve, reject){
-      if(v.readyState >= 2) return resolve();
-      v.addEventListener('loadeddata', function(){ resolve() }, { once:true });
-      v.addEventListener('error', function(){ reject(new Error('Video se nepodařilo načíst.')) }, { once:true });
-    });
-  }
+  var videoCache = {};
 
   // Thumbstick edge detection.
   var stickArmed = true;
@@ -149,11 +115,26 @@
     });
   }
 
+  function loadVideo(index){
+    if(videoCache[index]) return videoCache[index].ready;
+    var v = document.createElement('video');
+    v.crossOrigin = 'anonymous';
+    v.loop = true; v.muted = true; v.playsInline = true; v.preload = 'auto';
+    v.src = ASSETS[index].video;
+    var ready = new Promise(function(resolve, reject){
+      v.addEventListener('loadeddata', function(){ resolve(v) }, { once:true });
+      v.addEventListener('error', function(){ reject(new Error('Video se nepodařilo načíst.')) }, { once:true });
+    });
+    videoCache[index] = { el:v, ready:ready };
+    v.load();
+    return ready;
+  }
+
   // Warm the default (WebP) set so in-headset toggling is instant.
   ASSETS.forEach(function(a){ loadImage(a.webp).catch(function(){}) });
 
   function endSession(){
-    if(vbuf) vbuf.forEach(function(v){ try{ v.pause() }catch(e){} });
+    Object.keys(videoCache).forEach(function(k){ try{ videoCache[k].el.pause() }catch(e){} });
     landing.classList.remove('hidden');
     loading.classList.remove('visible');
     session = null; refSpace = null;
@@ -177,19 +158,12 @@
   }
 
   async function setVideoLocation(index){
-    ensureBuffers();
-    var url = ASSETS[index].video;
-    // Point both buffers at the chosen clip and wait until each can present frame 0.
-    await Promise.all(vbuf.map(function(v){
-      if(v.dataset.src !== url){ v.src = url; v.dataset.src = url; v.load(); }
-      return videoReady(v);
-    }));
+    var v = await loadVideo(index);
     if(!session) return;
-    activeBuf = 0;
-    var a = vbuf[0], b = vbuf[1];
-    try{ b.pause(); b.currentTime = 0; }catch(e){}   // prime the standby buffer at frame 0
-    try{ a.currentTime = 0; await a.play(); }catch(e){}
-    videoLayer = mediaBinding.createEquirectLayer(a, { space: refSpace, layout: 'mono' });
+    // Pause the other clips so only one decodes at a time.
+    Object.keys(videoCache).forEach(function(k){ if(+k !== index){ try{ videoCache[k].el.pause() }catch(e){} } });
+    try{ v.currentTime = 0; await v.play() }catch(e){}
+    videoLayer = mediaBinding.createEquirectLayer(v, { space: refSpace, layout: 'mono' });
     session.updateRenderState({ layers: [videoLayer] });
   }
 
