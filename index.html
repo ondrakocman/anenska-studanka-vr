@@ -16,11 +16,15 @@
     .logos img{height:96px;width:auto;object-fit:contain}
     .logos .noho{height:64px}
     h1{font-size:clamp(2.2rem,4.6vw,3.6rem);font-weight:800;letter-spacing:.01em;margin-bottom:10px;text-align:center;color:#0a2540}
-    .subtitle{color:#777;font-size:1rem;margin-bottom:48px;text-align:center;font-weight:400}
+    .subtitle{color:#777;font-size:1rem;margin-bottom:32px;text-align:center;font-weight:400}
+    .modes{display:inline-flex;background:#e2dccf;border-radius:60px;padding:6px;margin-bottom:36px;gap:4px;flex-wrap:wrap;justify-content:center}
+    .mode-btn{padding:12px 26px;font-size:.95rem;border:none;border-radius:60px;cursor:pointer;color:#0a2540;font-weight:700;background:transparent;font-family:inherit;transition:color .15s;letter-spacing:.02em}
+    .mode-btn.active{color:#fff;background:linear-gradient(135deg,#249e6b,#cedc00);box-shadow:0 4px 16px rgba(36,158,107,.35)}
+    .mode-sub{display:block;font-size:.68rem;font-weight:600;opacity:.75;margin-top:2px}
     .buttons{display:flex;gap:24px;align-items:center;flex-wrap:wrap;justify-content:center}
     .view-btn{padding:22px 56px;font-size:1.25rem;border:none;border-radius:60px;cursor:pointer;color:#fff;font-weight:700;text-transform:uppercase;letter-spacing:.05em;transition:transform .15s,box-shadow .15s;font-family:inherit;background:linear-gradient(135deg,#249e6b,#cedc00);box-shadow:0 6px 24px rgba(36,158,107,.35)}
     .view-btn:hover{transform:translateY(-2px);box-shadow:0 10px 32px rgba(36,158,107,.45)}
-    .hint{margin-top:32px;color:#888;font-size:.85rem;text-align:center;max-width:480px;line-height:1.5}
+    .hint{margin-top:32px;color:#888;font-size:.85rem;text-align:center;max-width:520px;line-height:1.5}
     .nav{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);font-size:.8rem;color:#888;text-decoration:none}
     .nav:hover{color:#0a2540}
     #loading-overlay{position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;color:#fff;font-size:1.2rem}
@@ -40,12 +44,19 @@
   </div>
   <h1>Větrný park Anenská Studánka – VR</h1>
   <p class="subtitle">Vizualizace větrného parku – tři lokace</p>
+
+  <div class="modes" role="group" aria-label="Kvalita zobrazení">
+    <button class="mode-btn active" data-mode="webp">Plynulé<span class="mode-sub">WebP · rychlé</span></button>
+    <button class="mode-btn" data-mode="video">Animované<span class="mode-sub">video</span></button>
+    <button class="mode-btn" data-mode="png">Plná kvalita<span class="mode-sub">PNG · velké</span></button>
+  </div>
+
   <div class="buttons">
     <button class="view-btn" data-index="0">Lokace 1</button>
     <button class="view-btn" data-index="1">Lokace 2</button>
     <button class="view-btn" data-index="2">Lokace 3</button>
   </div>
-  <p class="hint">Nasaďte Meta Quest a vyberte lokaci. V headsetu pak přepínáte mezi lokacemi nakloněním páčky ovladače doleva / doprava. Panorama se vykresluje pomocí WebXR Layers přímo systémovým kompozitorem.</p>
+  <p class="hint">Vyberte kvalitu a lokaci. V headsetu pak přepínáte mezi lokacemi nakloněním páčky ovladače doleva / doprava. Panorama se vykresluje pomocí WebXR Layers přímo systémovým kompozitorem.</p>
   <a class="nav" href="aframe/">klasická verze (A-Frame) →</a>
 </div>
 
@@ -60,21 +71,31 @@
   var loading = document.getElementById('loading-overlay');
   var errorBox = document.getElementById('error');
 
-  var LOCATIONS = ['assets/lokace-1.jpg', 'assets/lokace-2.jpg', 'assets/lokace-3.jpg'];
+  var ASSETS = [
+    { webp:'assets/lokace-1.webp', png:'assets/lokace-1.png', video:'assets/lokace-1.mp4' },
+    { webp:'assets/lokace-2.webp', png:'assets/lokace-2.png', video:'assets/lokace-2.mp4' },
+    { webp:'assets/lokace-3.webp', png:'assets/lokace-3.png', video:'assets/lokace-3.mp4' }
+  ];
 
   var session = null;
+  var refSpace = null;
+  var mode = 'webp';          // 'webp' | 'png' | 'video'
+  var currentIndex = 0;
+  var switching = false;
+
+  // Image path (webp / png) state.
+  var gl = null, glBinding = null, equirectLayer = null;
+  var currentImg = null, layerW = 0, layerH = 0, redrawFrames = 0;
   var imageCache = {};
 
-  // Layer/render state, shared with the frame loop.
-  var equirectLayer = null;
-  var glBinding = null;
-  var gl = null;
-  var currentImg = null;
-  var redrawFrames = 0;     // re-upload the texture for this many frames (covers double-buffered layers)
-  var currentIndex = 0;
+  // Video path state.
+  var mediaBinding = null, videoLayer = null;
+  var videoCache = {};
 
-  // Thumbstick edge detection: only fire once per flick, re-arm near centre.
+  // Thumbstick edge detection.
   var stickArmed = true;
+
+  function isImageMode(){ return mode === 'webp' || mode === 'png'; }
 
   function showError(msg, ttl){
     errorBox.textContent = msg;
@@ -94,40 +115,78 @@
     });
   }
 
-  // Warm the cache so in-headset toggling is instant.
-  LOCATIONS.forEach(function(src){ loadImage(src).catch(function(){}) });
-
-  function endSession(){
-    landing.classList.remove('hidden');
-    loading.classList.remove('visible');
-    session = null;
-    equirectLayer = null;
-    glBinding = null;
-    currentImg = null;
+  function loadVideo(index){
+    if(videoCache[index]) return videoCache[index].ready;
+    var v = document.createElement('video');
+    v.crossOrigin = 'anonymous';
+    v.loop = true; v.muted = true; v.playsInline = true; v.preload = 'auto';
+    v.src = ASSETS[index].video;
+    var ready = new Promise(function(resolve, reject){
+      v.addEventListener('loadeddata', function(){ resolve(v) }, { once:true });
+      v.addEventListener('error', function(){ reject(new Error('Video se nepodařilo načíst.')) }, { once:true });
+    });
+    videoCache[index] = { el:v, ready:ready };
+    v.load();
+    return ready;
   }
 
-  // Switch the displayed panorama in place, without ending the VR session.
-  async function showLocation(index){
+  // Warm the default (WebP) set so in-headset toggling is instant.
+  ASSETS.forEach(function(a){ loadImage(a.webp).catch(function(){}) });
+
+  function endSession(){
+    Object.keys(videoCache).forEach(function(k){ try{ videoCache[k].el.pause() }catch(e){} });
+    landing.classList.remove('hidden');
+    loading.classList.remove('visible');
+    session = null; refSpace = null;
+    glBinding = null; equirectLayer = null; currentImg = null; layerW = 0; layerH = 0;
+    mediaBinding = null; videoLayer = null;
+  }
+
+  async function setImageLocation(index){
+    var src = (mode === 'png') ? ASSETS[index].png : ASSETS[index].webp;
+    var img = await loadImage(src);
     if(!session) return;
-    index = (index + LOCATIONS.length) % LOCATIONS.length;
-    currentIndex = index;
-    var img;
-    try{ img = await loadImage(LOCATIONS[index]); }
-    catch(e){ return; }
-    if(!session) return;          // session may have ended while loading
     currentImg = img;
-    redrawFrames = 3;             // force a few re-uploads so every layer buffer updates
+    if(!equirectLayer || layerW !== img.width || layerH !== img.height){
+      equirectLayer = glBinding.createEquirectLayer({
+        space: refSpace, viewPixelWidth: img.width, viewPixelHeight: img.height, layout: 'mono'
+      });
+      layerW = img.width; layerH = img.height;
+      session.updateRenderState({ layers: [equirectLayer] });
+    }
+    redrawFrames = 3;           // re-upload over a few frames to cover layer buffering
+  }
+
+  async function setVideoLocation(index){
+    var v = await loadVideo(index);
+    if(!session) return;
+    // Pause the other clips so only one decodes at a time.
+    Object.keys(videoCache).forEach(function(k){ if(+k !== index){ try{ videoCache[k].el.pause() }catch(e){} } });
+    try{ v.currentTime = 0; await v.play() }catch(e){}
+    videoLayer = mediaBinding.createEquirectLayer(v, { space: refSpace, layout: 'mono' });
+    session.updateRenderState({ layers: [videoLayer] });
+  }
+
+  // Switch the displayed location in place, without leaving VR.
+  async function showLocation(index){
+    if(!session || switching) return;
+    switching = true;
+    currentIndex = (index + ASSETS.length) % ASSETS.length;
+    try{
+      if(mode === 'video') await setVideoLocation(currentIndex);
+      else await setImageLocation(currentIndex);
+    }catch(e){ showError(e.message || String(e)); }
+    switching = false;
   }
 
   // Poll Quest thumbstick X (xr-standard axes[2]); flick right = next, left = previous.
   function pollControllers(){
     if(!session) return;
-    var x = 0;
-    var sources = session.inputSources;
+    var x = 0, sources = session.inputSources;
     for(var i = 0; i < sources.length; i++){
       var gp = sources[i] && sources[i].gamepad;
       if(!gp || !gp.axes) continue;
-      var ax = gp.axes.length > 2 ? gp.axes[2] : gp.axes[0];   // thumbstick X, fall back to axis 0
+      var ax = gp.axes.length > 2 ? gp.axes[2] : gp.axes[0];
       if(Math.abs(ax) > Math.abs(x)) x = ax;
     }
     if(stickArmed && Math.abs(x) > 0.7){
@@ -138,14 +197,41 @@
     }
   }
 
-  async function startSession(startIndex){
+  function onFrame(t, frame){
+    if(!session) return;
+    session.requestAnimationFrame(onFrame);
+    pollControllers();
+    if(isImageMode() && equirectLayer){
+      if(equirectLayer.needsRedraw) redrawFrames = Math.max(redrawFrames, 3);
+      if(redrawFrames > 0 && currentImg){
+        redrawFrames--;
+        var sub = glBinding.getSubImage(equirectLayer, frame);
+        gl.bindTexture(gl.TEXTURE_2D, sub.colorTexture);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, currentImg);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+      }
+    }
+  }
+
+  async function startSession(modeArg, startIndex){
+    mode = modeArg;
+
     if(!('xr' in navigator)){
       showError('WebXR není v tomto prohlížeči podporováno – použijte klasickou verzi.');
       return;
     }
-    if(typeof XRWebGLBinding === 'undefined' || !XRWebGLBinding.prototype.createEquirectLayer){
-      showError('WebXR Layers nejsou podporovány – použijte klasickou verzi.');
-      return;
+    if(mode === 'video'){
+      if(typeof XRMediaBinding === 'undefined'){
+        showError('Přehrávání videa (WebXR Layers) není podporováno – použijte klasickou verzi.');
+        return;
+      }
+    }else{
+      if(typeof XRWebGLBinding === 'undefined' || !XRWebGLBinding.prototype.createEquirectLayer){
+        showError('WebXR Layers nejsou podporovány – použijte klasickou verzi.');
+        return;
+      }
     }
     var supported = false;
     try{ supported = await navigator.xr.isSessionSupported('immersive-vr') }catch(e){}
@@ -156,23 +242,15 @@
 
     loading.classList.add('visible');
 
-    var img;
-    try{
-      img = await loadImage(LOCATIONS[startIndex]);
-    }catch(e){
-      showError(e.message || String(e));
-      loading.classList.remove('visible');
-      return;
-    }
-    currentIndex = startIndex;
-    currentImg = img;
-
-    var canvas = document.createElement('canvas');
-    gl = canvas.getContext('webgl2', { xrCompatible: true });
-    if(!gl){
-      showError('WebGL2 není k dispozici – použijte klasickou verzi.');
-      loading.classList.remove('visible');
-      return;
+    // Set up GL up front for image modes (needs an xr-compatible context).
+    if(isImageMode()){
+      var canvas = document.createElement('canvas');
+      gl = canvas.getContext('webgl2', { xrCompatible: true });
+      if(!gl){
+        showError('WebGL2 není k dispozici – použijte klasickou verzi.');
+        loading.classList.remove('visible');
+        return;
+      }
     }
 
     try{
@@ -185,52 +263,33 @@
       return;
     }
 
-    var refSpace;
-    try{
-      refSpace = await session.requestReferenceSpace('local-floor');
-    }catch(e){
-      refSpace = await session.requestReferenceSpace('local');
-    }
+    try{ refSpace = await session.requestReferenceSpace('local-floor'); }
+    catch(e){ refSpace = await session.requestReferenceSpace('local'); }
 
-    glBinding = new XRWebGLBinding(session, gl);
-    // All panoramas share the same 8192×4096 resolution, so one layer serves all of them.
-    equirectLayer = glBinding.createEquirectLayer({
-      space: refSpace,
-      viewPixelWidth: img.width,
-      viewPixelHeight: img.height,
-      layout: 'mono'
-    });
-
-    session.updateRenderState({ layers: [equirectLayer] });
-    redrawFrames = 3;   // initial paint
-
-    // The layer is composited by the system. We re-upload the texture when the
-    // compositor asks for a redraw, or when we just switched location.
-    function onFrame(t, frame){
-      if(!session) return;
-      session.requestAnimationFrame(onFrame);
-      pollControllers();
-      if(equirectLayer.needsRedraw) redrawFrames = Math.max(redrawFrames, 3);
-      if(redrawFrames > 0 && currentImg){
-        redrawFrames--;
-        var subImage = glBinding.getSubImage(equirectLayer, frame);
-        gl.bindTexture(gl.TEXTURE_2D, subImage.colorTexture);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, currentImg);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        gl.bindTexture(gl.TEXTURE_2D, null);
-      }
-    }
-    session.requestAnimationFrame(onFrame);
+    if(isImageMode()) glBinding = new XRWebGLBinding(session, gl);
+    else mediaBinding = new XRMediaBinding(session);
 
     session.addEventListener('end', endSession);
+    session.requestAnimationFrame(onFrame);
+
+    await showLocation(startIndex);
 
     landing.classList.add('hidden');
     loading.classList.remove('visible');
   }
 
+  // Mode selector.
+  document.querySelectorAll('.mode-btn').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('.mode-btn').forEach(function(b){ b.classList.remove('active') });
+      btn.classList.add('active');
+      mode = btn.dataset.mode;
+    });
+  });
+
+  // Location buttons start a session in the currently selected mode.
   document.querySelectorAll('.view-btn').forEach(function(btn){
-    btn.addEventListener('click', function(){ startSession(parseInt(btn.dataset.index, 10) || 0) });
+    btn.addEventListener('click', function(){ startSession(mode, parseInt(btn.dataset.index, 10) || 0) });
   });
 })();
 </script>
