@@ -66,8 +66,10 @@
 <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
 
 <a-scene vr-mode-ui="enabled:false" renderer="colorManagement:true;antialias:true" loading-screen="enabled:false" webxr="requiredFeatures:local-floor">
-  <a-assets timeout="600000">
-    <video id="vid" crossorigin="anonymous" loop muted playsinline preload="auto"></video>
+  <a-assets timeout="60000">
+    <img id="webp-0" src="../assets/lokace-1.webp" crossorigin="anonymous">
+    <img id="webp-1" src="../assets/lokace-2.webp" crossorigin="anonymous">
+    <img id="webp-2" src="../assets/lokace-3.webp" crossorigin="anonymous">
   </a-assets>
   <a-sky id="sky" visible="false" material="shader:flat;side:back"></a-sky>
   <a-entity id="rig" position="0 1.6 0">
@@ -76,6 +78,10 @@
     <a-entity id="right-hand" oculus-touch-controls="hand:right" laser-controls="hand:right"></a-entity>
   </a-entity>
 </a-scene>
+
+<!-- Video kept OUTSIDE <a-assets> so an empty (src-less) media element never blocks scene load.
+     PNG <img> elements are created lazily below. Both are referenced by selector. -->
+<video id="vid" crossorigin="anonymous" loop muted playsinline preload="auto" style="display:none"></video>
 
 <script>
 (function(){
@@ -92,24 +98,43 @@
     { webp:'../assets/lokace-3.webp', png:'../assets/lokace-3.png', video:'../assets/lokace-3.mp4' }
   ];
 
+  var assetsEl = document.querySelector('a-assets');
   var mode = 'webp';
   var currentIndex = 0;
   var active = false;
   var stickArmed = true;
 
+  // Lazily create a full-quality PNG <img> the first time it is needed, referenced by selector.
+  function ensurePng(index){
+    var id = 'png-' + index;
+    if(!document.getElementById(id)){
+      var img = document.createElement('img');
+      img.id = id;
+      img.crossOrigin = 'anonymous';
+      img.src = ASSETS[index].png;
+      assetsEl.appendChild(img);
+    }
+    return '#' + id;
+  }
+
+  // Resolve the selector for the current mode/location and start playback for video.
+  function srcSelectorFor(index){
+    if(mode === 'video'){
+      if(vid.getAttribute('src') !== ASSETS[index].video){
+        vid.src = ASSETS[index].video;
+        vid.load();
+      }
+      vid.play().catch(function(){});
+      return '#vid';
+    }
+    if(mode === 'png') return ensurePng(index);
+    return '#webp-' + index;
+  }
+
   function applyLocation(index){
     currentIndex = (index + ASSETS.length) % ASSETS.length;
-    if(mode === 'video'){
-      vid.pause();
-      vid.src = ASSETS[currentIndex].video;
-      vid.load();
-      vid.play().catch(function(){});
-      sky.setAttribute('material', { shader:'flat', side:'back', src:'#vid' });
-    }else{
-      vid.pause();
-      var url = (mode === 'png') ? ASSETS[currentIndex].png : ASSETS[currentIndex].webp;
-      sky.setAttribute('material', { shader:'flat', side:'back', src:url });
-    }
+    if(mode !== 'video'){ try{ vid.pause() }catch(e){} }
+    sky.setAttribute('material', 'src', srcSelectorFor(currentIndex));
   }
 
   // Mode selector.
@@ -126,7 +151,11 @@
       loading.classList.add('visible');
       if(!scene.hasLoaded) await new Promise(function(r){ scene.addEventListener('loaded', r, { once:true }) });
       applyLocation(parseInt(btn.dataset.index, 10) || 0);
-      try{ await scene.enterVR() }catch(e){ console.warn('VR fallback (2D režim):', e) }
+      // Only enter immersive VR when the device actually supports it; otherwise stay in the
+      // desktop 2D view (drag to look around) instead of waiting on a VR request.
+      var vrOK = false;
+      try{ vrOK = navigator.xr && await navigator.xr.isSessionSupported('immersive-vr') }catch(e){}
+      if(vrOK){ try{ await scene.enterVR() }catch(e){ console.warn('VR fallback (2D režim):', e) } }
       sky.object3D.visible = true;
       active = true;
       landing.classList.add('hidden');
